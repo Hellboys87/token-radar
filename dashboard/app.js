@@ -31,6 +31,14 @@
     return '<span class="' + cls + '">' + (n > 0 ? '+' : '') + n.toFixed(1) + '%</span>';
   }
   function age(n) { return n == null ? '—' : n >= 365 ? (n / 365).toFixed(1) + 'y' : n + 'd'; }
+  // The board's signal for one row, derived live from its own figures:
+  // a strong week first, then a long record, then an early find.
+  function signal(r) {
+    if (r.change_7d != null && r.change_7d >= 5) return 'MOMENTUM';
+    if (r.age_days != null && r.age_days >= 730) return 'ESTABLISHED';
+    if (r.tvl_usd < R.floor_usd) return 'EARLY FIND';
+    return 'STEADY';
+  }
   function params() { return new URLSearchParams(location.search); }
   function go(p) { location.search = p.toString(); }
   function link(view, extra) {
@@ -74,11 +82,13 @@
     var cat = p.get('cat') || '';
     var chain = p.get('chain') || '';
     var wlOnly = p.get('wl') === '1';
+    var gainOnly = p.get('gain') === '1';
     var sort = SORTS[p.get('sort')] ? p.get('sort') : 'rank';
     var dir = p.get('dir') === 'desc' ? -1 : 1;
 
     var rows = R.rows.filter(function (r) {
       if (wlOnly && !wl[r.slug]) return false;
+      if (gainOnly && !(r.change_7d != null && r.change_7d > 0)) return false;
       if (cat && r.category !== cat) return false;
       if (chain && r.chains.indexOf(chain) < 0) return false;
       if (q && (r.name.toLowerCase().indexOf(q) < 0 && r.slug.indexOf(q) < 0 && (r.category || '').toLowerCase().indexOf(q) < 0)) return false;
@@ -103,7 +113,8 @@
       '<select id="chain"><option value="">All chains</option>' + chains.map(function (c) {
         return '<option' + (c === chain ? ' selected' : '') + '>' + esc(c) + '</option>';
       }).join('') + '</select>' +
-      '<label><input type="checkbox" id="wl"' + (wlOnly ? ' checked' : '') + '> Watchlist only</label></div>';
+      '<label><input type="checkbox" id="wl"' + (wlOnly ? ' checked' : '') + '> Watchlist only</label>' +
+      '<label><input type="checkbox" id="gain"' + (gainOnly ? ' checked' : '') + '> Gainers only (7d &gt; 0)</label></div>';
     h += '<p class="count">Showing <b>' + rows.length + '</b> of ' + R.board_size +
       ' ranked protocols. Click a row for its detail and farm plan; click a header to sort.</p>';
     h += '<table><thead><tr>' + th('rank', '#') + th('name', 'Protocol') + th('tvl', 'TVL', 1) +
@@ -112,6 +123,7 @@
     rows.forEach(function (r) {
       h += '<tr data-slug="' + esc(r.slug) + '"><td class="num">' + r.rank + '</td>' +
         '<td><span class="name">' + esc(r.name) + '</span>' + (wl[r.slug] ? '<span class="badge">WATCHLIST</span>' : '') +
+        '<span class="badge sig">' + signal(r) + '</span>' +
         '<br><span class="slug">' + esc(r.slug) + ' · ' + esc(r.category || 'Uncategorized') + '</span></td>' +
         '<td class="num">' + money(r.tvl_usd) + '</td>' +
         '<td class="num">' + pct(r.change_7d) + '</td>' +
@@ -131,6 +143,7 @@
       if (cv) np.set('cat', cv);
       if (hv) np.set('chain', hv);
       if (document.getElementById('wl').checked) np.set('wl', '1');
+      if (document.getElementById('gain').checked) np.set('gain', '1');
       if (sort !== 'rank') { np.set('sort', sort); if (dir === -1) np.set('dir', 'desc'); }
       go(np);
     }
@@ -138,6 +151,7 @@
     document.getElementById('cat').addEventListener('change', apply);
     document.getElementById('chain').addEventListener('change', apply);
     document.getElementById('wl').addEventListener('change', apply);
+    document.getElementById('gain').addEventListener('change', apply);
     app.querySelectorAll('th.sortable').forEach(function (el) {
       el.addEventListener('click', function () {
         var k = el.getAttribute('data-sort');
@@ -171,14 +185,16 @@
       cell(money(r.implied_value_usd), 'Implied value') + '</div>' +
       '<h3>How impliedValue gets ' + money(r.implied_value_usd) + '</h3>' +
       '<div class="formula">base = TVL × anchor = ' + money(r.tvl_usd) + ' × ' + r.anchor.toFixed(3) + ' = <b>' + money(r.base_usd) + '</b><br>' +
-      'growthMultiplier(' + r.growth_pct.toFixed(1) + '% 7d, clamped −60…+150, weight ' + m.growth_weight + ') = <b>' + r.growth_multiplier.toFixed(3) + '</b><br>' +
+      'growthMultiplier(' + r.growth_pct.toFixed(1) + '% 7d, 1 + ' + m.growth_weight + ' × tanh(change/' + m.growth_scale_pct + ')) = <b>' + r.growth_multiplier.toFixed(3) + '</b><br>' +
       'maturityMultiplier(' + age(r.age_days) + ', 0.55 + 0.45 × (1 − e^(−age/540))) = <b>' + r.maturity_multiplier.toFixed(3) + '</b><br>' +
       'chainMultiplier(' + r.chains.length + ' chain' + (r.chains.length === 1 ? '' : 's') + ', +0.03 each, capped +0.30) = <b>' + r.chain_multiplier.toFixed(3) + '</b><br>' +
       'implied = base × growth × maturity × chains = <b>' + money(r.implied_value_usd) + '</b></div>' +
-      '<p class="note">The anchor is the median mcap/TVL of live protocols in the “' + esc(r.category || 'Uncategorized') +
-      '” category (global median ' + R.global_anchor.toFixed(3) + ' when the category has fewer than ' + m.category_min_samples +
-      ' live samples), clamped to ' + m.anchor_min + '–' + m.anchor_max + '. The snapshot records no token for this protocol.</p></div>';
-    h += '<div class="card"><h3>Farm plan — 6 steps</h3><ol class="farm">' +
+      '<p class="note">The anchor starts from the median mcap/TVL of the ' + r.anchor_samples + ' live protocols in the “' + esc(r.category || 'Uncategorized') +
+      '” category (median ' + r.anchor_median.toFixed(3) + ') and is shrunk toward the market-wide median ' + R.global_anchor.toFixed(3) +
+      ' by sample count — (n × median + ' + m.anchor_shrinkage + ' × global) / (n + ' + m.anchor_shrinkage + '), or the global median outright under ' +
+      m.category_min_samples + ' samples — then clamped to ' + m.anchor_min + '–' + m.anchor_max +
+      '. Signal: ' + signal(r) + '. The snapshot records no token for this protocol.</p></div>';
+    h += '<div class="card"><h3>Farm plan — ' + r.farm_steps.length + ' steps</h3><ol class="farm">' +
       r.farm_steps.map(function (s) { return '<li>' + esc(s) + '</li>'; }).join('') + '</ol></div>';
     app.innerHTML = h;
   }
@@ -210,14 +226,15 @@
       R.as_of + '; no protocol name is ever special-cased.</p>' +
       '<div class="formula">impliedValue = TVL × anchor × growthMultiplier × maturityMultiplier × chainMultiplier</div>' +
       '<ol class="farm">' +
-      '<li><b>anchor</b> — the median market-cap/TVL ratio of the live protocols in the same category (at least ' + m.category_min_samples + ' samples, else the market-wide median ' + R.global_anchor.toFixed(3) + '), clamped to ' + m.anchor_min + '–' + m.anchor_max + '. A category the market already prices richly anchors higher.</li>' +
-      '<li><b>growthMultiplier</b> — 1 + ' + m.growth_weight + ' × clamp(change_7d, ' + m.growth_floor + ', +' + m.growth_cap + ') / 100. A protocol growing fast earns more; a shrinking one earns less, but never below ' + (1 + m.growth_weight * m.growth_floor / 100).toFixed(2) + '×.</li>' +
+      '<li><b>anchor</b> — the median market-cap/TVL ratio of the live protocols in the same category, shrunk toward the market-wide median ' + R.global_anchor.toFixed(3) + ' by sample count: (n × category median + ' + m.anchor_shrinkage + ' × global) / (n + ' + m.anchor_shrinkage + '), with the global median outright under ' + m.category_min_samples + ' samples, clamped to ' + m.anchor_min + '–' + m.anchor_max + '. A category priced by three protocols barely moves off the market median; one priced by forty stands on its own.</li>' +
+      '<li><b>growthMultiplier</b> — 1 + ' + m.growth_weight + ' × tanh(change_7d / ' + m.growth_scale_pct + '). Weekly TVL changes are noisy — this snapshot holds a +4,448% week — so the curve saturates: a real trend moves the value (about +10% at +5.6% growth), and no single week, however freakish, adds or removes more than ' + (m.growth_weight * 100).toFixed(0) + '%.</li>' +
       '<li><b>maturityMultiplier</b> — ' + m.maturity_floor + ' + ' + m.maturity_range + ' × (1 − e^(−age/' + m.maturity_halflife_days + ')). Older protocols earn more of the multiple, with diminishing returns; unknown age counts as ' + m.unknown_age_multiplier + '×.</li>' +
       '<li><b>chainMultiplier</b> — 1 + ' + m.chain_bonus + ' per extra chain, capped at +' + (m.chain_bonus * m.chain_bonus_cap).toFixed(2) + '. TVL spread across chains is harder to fake and easier to farm.</li>' +
+      '<li><b>who is ranked</b> — a protocol is ranked only when the snapshot records no token for it and it is not a wrapped, staked or bridged product of a token that already trades: categories like Bridge and Liquid Staking, names carrying the whole word wrapped, staked or staking, names beginning with an exchange’s name, and versioned pools are all left out, because WBTC is Bitcoin in a wrapper, not a launch still to come.</li>' +
       '</ol></div>' +
       '<div class="card"><h3>The board</h3><p class="sub">All ' + R.watchlist_size + ' watchlist protocols (TVL ≥ ' + money(R.floor_usd) +
-      ', no token recorded) plus the ' + R.early_size + ' largest pre-token protocols below the floor — ' + R.board_size +
-      ' rows. Live-token protocols sit apart in the Live token view, priced by the market, never by this model.</p></div>';
+      ', no token recorded) plus every other rankable pre-token protocol below the floor — ' + R.early_size + ' early finds, ' + R.board_size +
+      ' rows in all, with no TVL shortlist cutting the small ones before the model scores them. Each row carries a signal — Momentum, Established, Early find or Steady — read from its own figures. Live-token protocols sit apart in the Live token view, priced by the market, never by this model.</p></div>';
     app.innerHTML = h;
   }
 
